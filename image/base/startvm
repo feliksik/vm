@@ -104,6 +104,9 @@ IFACE=eth0
 BRIDGE_IFACE=br0
 
 
+IFACE2=eth1
+
+
 MAC=`ip addr show $IFACE | grep ether | sed -e 's/^[[:space:]]*//g' -e 's/[[:space:]]*\$//g' | cut -f2 -d ' '`
 IP=`ip addr show dev $IFACE | grep "inet $IP_PREFIX" | awk '{print $2}' | cut -f1 -d/`
 CIDR=`ip addr show dev $IFACE | grep "inet $IP_PREFIX" | awk '{print $2}' | cut -f2 -d/`
@@ -114,11 +117,12 @@ NAMESERVERS=`echo ${NAMESERVER[*]} | sed "s/ /,/"`
 
 cat > /etc/dnsmasq.conf << EOF
 user=root
-dhcp-range=$IP,$IP
-dhcp-host=$MAC,$HOSTNAME,$IP,infinite
-dhcp-option=option:router,$GATEWAY
-dhcp-option=option:netmask,$NETMASK
-dhcp-option=option:dns-server,$NAMESERVERS
+dhcp-range=192.168.1.10,192.168.1.20
+dhcp-host=$MAC,$HOSTNAME,192.168.1.10,infinite
+dhcp-option=option:router,192.168.1.1
+dhcp-option=option:netmask,255.255.255.0
+dhcp-option=option:dns-server,8.8.8.8,8.8.4.4
+interface=$BRIDGE_IFACE
 EOF
 
 if [ -z $NO_DHCP ]; then
@@ -137,20 +141,45 @@ i=`atoi $IP`
 let "i=$i^(1<<$CIDR)"
 NEWIP=`itoa i`
 
-ip link set dev $IFACE down
-ip link set $IFACE address $NEWMAC
-ip addr del $IP/$CIDR dev $IFACE
+
+#ip link set dev $IFACE down
+#ip link set $IFACE address $NEWMAC
+#ip addr del $IP/$CIDR dev $IFACE
+
+
+ip link add dev $IFACE2 type dummy
 
 brctl addbr $BRIDGE_IFACE
-brctl addif $BRIDGE_IFACE $IFACE
-ip link set dev $IFACE up
+brctl addif $BRIDGE_IFACE $IFACE2
+ip link set dev $IFACE2 up
 ip link set dev $BRIDGE_IFACE up
-ip addr add $NEWIP/$NEWCIDR dev $BRIDGE_IFACE
+
 
 if [[ $? -ne 0 ]]; then
     echo "Failed to bring up network bridge"
     exit 4
 fi
+
+
+
+# nerdalize stuff
+#
+#
+#
+
+ip addr add 192.168.1.1/24 dev $BRIDGE_IFACE
+
+# nat outgoing traffic
+iptables -A POSTROUTING -s 192.168.1.0/24 -j MASQUERADE -t nat
+
+
+# private IP space
+iptables -I FORWARD -d 192.168.1.0/24 -j ACCEPT # accept traffic to local bridge
+iptables -A FORWARD -d 10.0.0.0/8 -j DROP
+iptables -A FORWARD -d 172.16.0.0/12 -j DROP
+iptables -A FORWARD -d 192.168.0.0/16 -j DROP
+
+
 
 # Exec kvm as PID 1
 
