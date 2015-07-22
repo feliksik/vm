@@ -1,4 +1,4 @@
-NAME = rancher/vm-base
+NAME = nerdalize/vm-base
 VERSION = 0.0.1
 
 .PHONY : all clean build
