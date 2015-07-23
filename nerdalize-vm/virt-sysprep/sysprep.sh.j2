@@ -1,0 +1,1 @@
+LIBGUESTFS_DEBUG=1 LIBGUESTFS_TRACE=1 virt-sysprep --hostname {{vmname}} --password ubuntu:password:{{password}} -a $1 --firstboot /vm/virt-sysprep/firstboot.sh >/virt-sysprep.log

@@ -1,0 +1,32 @@
+vm:
+  image: nerdalize/vm-base:{{vmbase_version}}
+  environment:
+    - RANCHER_VM=true
+    - IMAGE={{image}}
+    - CORES={{cores}}
+    - MEMORY={{memory}}
+  cap_add:
+    - NET_ADMIN
+  devices: 
+    - /dev/kvm:/dev/kvm
+    - /dev/net/tun:/dev/net/tun
+  volumes: 
+    - ~/ranchervm-images:/base_image
+    - /tmp/ranchervm:/ranchervm
+    - ~/live/vms/{{vmname}}:/vm
+    - /boot:/boot
+    - /lib/modules:/lib/modules
+  restart: always
+tunnel: 
+  image: nerdalize/ntun-client:{{ntunclient_version}}
+  volumes: 
+    - ~/.ssh/nerdalize/nerdalize_ntun:/root/.ssh/rsa.priv
+    - ~/live/vms/{{vmname}}/connections:/etc/autossh/connections
+  volumes_from:
+    - vm
+  restart: always
+  net: container:vm
+  
+  
+  
+
