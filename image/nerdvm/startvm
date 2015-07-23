@@ -2,48 +2,36 @@
 
 #set -x
 
-# For debugging
-if [ "$1" = "bash" ]; then
-  exec bash
-fi
-
-CORES=${CORES-1}
-MEMORY=${MEMORY-512}
-
 # These two variables can be overwritten
 
 : ${KVM_BLK_OPTS:="-drive file=\$KVM_IMAGE,if=none,id=drive-disk0,format=qcow2 \
 -device virtio-blk-pci,scsi=off,bus=pci.0,addr=0x6,drive=drive-disk0,id=virtio-disk0,bootindex=1"}
 : ${KVM_NET_OPTS:="-netdev bridge,br=\$BRIDGE_IFACE,id=net0 \
--device virtio-net-pci,netdev=net0,mac=\$MAC"}
+-device virtio-net-pci,netdev=net0,mac=\$MAC"}: 
+: ${KVM_CPU_OPTS:="-smp cpus=$RANCHERVM_CPUS"}
 
-: ${KVM_SMP_OPTS:="-smp cores=$CORES"}
-: ${KVM_MEM_OPTS:="-m $MEMORY"}
 
+# use 1 cpu by default
+RANCHERVM_CPU=${RANCHERVM_CPUS-1}
+
+# For debugging
+if [ "$1" = "bash" ]; then
+  exec bash
+fi
 
 # Pass Docker command args to kvm
 KVM_ARGS=$@
-
-BASEDIR=/base_image
-
-BASE_IMAGE_PATH=$BASEDIR/$IMAGE
-
-BASE_IMAGE_FILE=$BASE_IMAGE_PATH
-# use $IMAGE subdir/file if supplied. 
-# if resulting BASE_IMAGE is a dir, use the first file found.
-if [ -d "$BASE_IMAGE_PATH" ]; then
-  # use the first file as base image
-  BASE_IMAGE_FILE=$BASEDIR/$(ls -p $BASE_IMAGE_PATH | grep -v "/" | head -n1)
-  echo "Specified image $BASE_IMAGE_PATH is a directory. Using file $BASE_IMAGE_FILE"
-fi
-
-# resolve symlink as 'qemu-img create' doesn't like symlink
-BASE_IMAGE_FILE=$(readlink -e $BASE_IMAGE_FILE)
 
 # Create the qcow disk image on the Docker volume named /image, using
 # the compressed qcow image that came with Docker image as the base.
 # Docker volumes typically perform better than the file system for
 # Docker images (no need for overlay fs etc.)
+
+BASE_IMAGE_DIR_LIST=( `ls /base_image` )
+if [ ${#BASE_IMAGE_DIR_LIST[@]} -ne 1 ]; then
+  echo "/base_image directory must contain exactly one base image file"
+  exit 1
+fi
 
 if [ ! -d "/image" ]; then
   echo "/image directory does not exist, failed to mount volume /image?"
@@ -52,7 +40,8 @@ fi
 
 KVM_IMAGE=/image/sda.qcow2
 if [ ! -f "$KVM_IMAGE" ]; then
-  qemu-img create -f qcow2 -b $BASE_IMAGE_FILE \
+  echo qemu-img create -f qcow2 -b /base_image/${BASE_IMAGE_DIR_LIST[0]} $KVM_IMAGE 
+  qemu-img create -f qcow2 -b /base_image/${BASE_IMAGE_DIR_LIST[0]} \
   $KVM_IMAGE > /dev/null
   if [[ $? -ne 0 ]]; then
     echo "Failed to create qcow2 image"
@@ -60,39 +49,13 @@ if [ ! -f "$KVM_IMAGE" ]; then
   fi
 fi
 
-# do virt-sysprep, if set
-if [ -f "/vm/virt-sysprep/sysprep.sh" ]; then
-     #virt-sysprep --hostname vm-{{client_name}}-{{machine_nr}} --password ubuntu:password:{{machine_pass}} -a $KVM_IMAGE --firstboot {{firstboot_script}}
-     echo "doing virt-sysprep"
-    /vm/virt-sysprep/sysprep.sh $KVM_IMAGE
-else
-     echo "NOT doing virt-sysprep"
-fi
-
 # Network setup:
 #
 # 1. Create a bridge named br0
 # 2. Remove IP from eth0, save eth0 MAC, give eth0 a random MAC
 
-function atoi
-{
-  #Returns the integer representation of an IP arg, passed in ascii dotted-decimal notation (x.x.x.x)
-  IP=$1; IPNUM=0
-  for (( i=0 ; i<4 ; ++i )); do
-  ((IPNUM+=${IP%%.*}*$((256**$((3-${i}))))))
-  IP=${IP#*.}
-  done
-  echo $IPNUM 
-} 
- 
-function itoa
-{
-  #returns the dotted-decimal ascii form of an IP arg passed in integer format
-  echo -n $(($(($(($((${1}/256))/256))/256))%256)).
-  echo -n $(($(($((${1}/256))/256))%256)).
-  echo -n $(($((${1}/256))%256)).
-  echo $((${1}%256)) 
-}
+IFACE=eth0
+BRIDGE_IFACE=br0
 
 cidr2mask() {
   local i mask=""
@@ -113,14 +76,6 @@ cidr2mask() {
   echo $mask
 }
 
-
-IFACE=eth0
-BRIDGE_IFACE=br0
-
-
-IFACE2=eth1
-
-
 MAC=`ip addr show $IFACE | grep ether | sed -e 's/^[[:space:]]*//g' -e 's/[[:space:]]*\$//g' | cut -f2 -d ' '`
 IP=`ip addr show dev $IFACE | grep "inet $IP_PREFIX" | awk '{print $2}' | cut -f1 -d/`
 CIDR=`ip addr show dev $IFACE | grep "inet $IP_PREFIX" | awk '{print $2}' | cut -f2 -d/`
@@ -131,12 +86,11 @@ NAMESERVERS=`echo ${NAMESERVER[*]} | sed "s/ /,/"`
 
 cat > /etc/dnsmasq.conf << EOF
 user=root
-dhcp-range=192.168.1.10,192.168.1.20
-dhcp-host=$MAC,$HOSTNAME,192.168.1.10,infinite
-dhcp-option=option:router,192.168.1.1
-dhcp-option=option:netmask,255.255.255.0
-dhcp-option=option:dns-server,8.8.8.8,8.8.4.4
-interface=$BRIDGE_IFACE
+dhcp-range=$IP,$IP
+dhcp-host=$MAC,$HOSTNAME,$IP,infinite
+dhcp-option=option:router,$GATEWAY
+dhcp-option=option:netmask,$NETMASK
+dhcp-option=option:dns-server,$NAMESERVERS
 EOF
 
 if [ -z $NO_DHCP ]; then
@@ -150,50 +104,47 @@ NEWMAC=`echo 06:FE$end`
 
 let "NEWCIDR=$CIDR-1"
 #NEWNETMASK=`cidr2mask $NEWCIDR`
+
+function atoi
+{
+#Returns the integer representation of an IP arg, passed in ascii dotted-decimal notation (x.x.x.x)
+IP=$1; IPNUM=0
+for (( i=0 ; i<4 ; ++i )); do
+((IPNUM+=${IP%%.*}*$((256**$((3-${i}))))))
+IP=${IP#*.}
+done
+echo $IPNUM 
+} 
+ 
+function itoa
+{
+#returns the dotted-decimal ascii form of an IP arg passed in integer format
+echo -n $(($(($(($((${1}/256))/256))/256))%256)).
+echo -n $(($(($((${1}/256))/256))%256)).
+echo -n $(($((${1}/256))%256)).
+echo $((${1}%256)) 
+}
  
 i=`atoi $IP`
 let "i=$i^(1<<$CIDR)"
 NEWIP=`itoa i`
 
+exec bash
 
-#ip link set dev $IFACE down
-#ip link set $IFACE address $NEWMAC
-#ip addr del $IP/$CIDR dev $IFACE
-
-
-ip link add dev $IFACE2 type dummy
+ip link set dev $IFACE down
+ip link set $IFACE address $NEWMAC
+ip addr del $IP/$CIDR dev $IFACE
 
 brctl addbr $BRIDGE_IFACE
-brctl addif $BRIDGE_IFACE $IFACE2
-ip link set dev $IFACE2 up
+brctl addif $BRIDGE_IFACE $IFACE
+ip link set dev $IFACE up
 ip link set dev $BRIDGE_IFACE up
-
+ip addr add $NEWIP/$NEWCIDR dev $BRIDGE_IFACE
 
 if [[ $? -ne 0 ]]; then
     echo "Failed to bring up network bridge"
     exit 4
 fi
-
-
-
-# nerdalize stuff
-#
-#
-#
-
-ip addr add 192.168.1.1/24 dev $BRIDGE_IFACE
-
-# nat outgoing traffic
-iptables -A POSTROUTING -s 192.168.1.0/24 -j MASQUERADE -t nat
-
-
-# private IP space
-iptables -I FORWARD -d 192.168.1.0/24 -j ACCEPT # accept traffic to local bridge
-iptables -A FORWARD -d 10.0.0.0/8 -j DROP
-iptables -A FORWARD -d 172.16.0.0/12 -j DROP
-iptables -A FORWARD -d 192.168.0.0/16 -j DROP
-
-
 
 # Exec kvm as PID 1
 
@@ -209,8 +160,11 @@ if [ -d /ranchervm ]; then
     echo VNC server will listen on Unix socket /ranchervm/vm/$DOCKERID/vnc
 fi
 
-exec kvm $VNC \
-    `eval echo $KVM_BLK_OPTS` \
-    `eval echo $KVM_NET_OPTS` \
-    `eval echo $KVM_MEM_OPTS` \
-    `eval echo $KVM_SMP_OPTS` $KVM_ARGS
+#exec kvm $VNC $(eval echo $KVM_BLK_OPTS) $(eval echo $KVM_NET_OPTS) $(eval echo $KVM_CPU_OPTS) $KVM_ARGS
+exec kvm $VNC $(eval echo $KVM_BLK_OPTS) $(eval echo $KVM_NET_OPTS) $KVM_ARGS
+
+
+
+
+
+
